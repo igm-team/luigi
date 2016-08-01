@@ -169,12 +169,16 @@ class SGEJobTask(luigi.Task):
           Task classes and dependencies are pickled to a temporary folder on
           this drive. The default is ``/home``, the NFS share location setup
           by StarCluster
+    - poll_time: the length of time to wait in order to poll qstat
 
     """
 
     n_cpu = luigi.IntParameter(default=2, significant=False)
     shared_tmp_dir = luigi.Parameter(default='/home', significant=False)
     parallel_env = luigi.Parameter(default='orte', significant=False)
+    poll_time = luigi.IntParameter(
+        significant=False, default=POLL_TIME,
+        description="specify the wait time to poll qstat for the job status")
 
     def _fetch_task_failures(self):
         if not os.path.exists(self.errfile):
@@ -267,7 +271,7 @@ class SGEJobTask(luigi.Task):
     def _track_job(self):
         while True:
             # Sleep for a little bit
-            time.sleep(POLL_TIME)
+            time.sleep(self.poll_time)
 
             # See what the job's up to
             # ASSUMPTION
