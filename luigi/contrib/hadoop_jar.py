@@ -22,7 +22,6 @@ import logging
 import os
 import pipes
 import random
-import warnings
 
 import luigi.contrib.hadoop
 import luigi.contrib.hdfs
@@ -70,10 +69,6 @@ class HadoopJarJobRunner(luigi.contrib.hadoop.JobRunner):
         pass
 
     def run_job(self, job, tracking_url_callback=None):
-        if tracking_url_callback is not None:
-            warnings.warn("tracking_url_callback argument is deprecated, task.set_tracking_url is "
-                          "used instead.", DeprecationWarning)
-
         # TODO(jcrobak): libjars, files, etc. Can refactor out of
         # hadoop.HadoopJobRunner
         if not job.jar():
@@ -114,7 +109,7 @@ class HadoopJarJobRunner(luigi.contrib.hadoop.JobRunner):
                 raise HadoopJarJobError("job jar does not exist")
             arglist = hadoop_arglist
 
-        luigi.contrib.hadoop.run_and_track_hadoop_job(arglist, job.set_tracking_url)
+        luigi.contrib.hadoop.run_and_track_hadoop_job(arglist, tracking_url_callback)
 
         for a, b in tmp_files:
             a.move(b)

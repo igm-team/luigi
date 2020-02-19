@@ -45,21 +45,17 @@ logger = logging.getLogger('luigi-interface')
 
 class RemoteFileSystem(luigi.target.FileSystem):
 
-    def __init__(self, host, username=None, password=None, port=None, tls=False, timeout=60, sftp=False):
+    def __init__(self, host, username=None, password=None, port=21, tls=False, timeout=60, sftp=False):
         self.host = host
         self.username = username
         self.password = password
+        self.port = port
         self.tls = tls
         self.timeout = timeout
         self.sftp = sftp
 
-        if port is None:
-            if self.sftp:
-                self.port = 22
-            else:
-                self.port = 21
-        else:
-            self.port = port
+        if self.sftp:
+            self.port = 22
 
     def _connect(self):
         """
@@ -131,12 +127,14 @@ class RemoteFileSystem(luigi.target.FileSystem):
         return exists
 
     def _ftp_exists(self, path, mtime):
-        dirname, fn = os.path.split(path)
+        path_parts = path.split('/')
+        path = '/'.join(path_parts[:-1])
+        fn = path_parts[-1]
 
-        files = self.conn.nlst(dirname)
+        files = self.conn.nlst(path)
 
         exists = False
-        if path in files or fn in files:
+        if fn in files:
             if mtime:
                 mdtm = self.conn.sendcmd('MDTM ' + path)
                 modified = datetime.datetime.strptime(mdtm[4:], "%Y%m%d%H%M%S")
@@ -349,7 +347,7 @@ class RemoteTarget(luigi.target.FileSystemTarget):
 
     def __init__(
         self, path, host, format=None, username=None,
-        password=None, port=None, mtime=None, tls=False,
+        password=None, port=21, mtime=None, tls=False,
         timeout=60, sftp=False
     ):
         if format is None:
@@ -392,7 +390,7 @@ class RemoteTarget(luigi.target.FileSystemTarget):
                 FileWrapper(io.BufferedReader(io.FileIO(self.__tmp_path, 'r')))
             )
         else:
-            raise Exception("mode must be 'r' or 'w' (got: %s)" % mode)
+            raise Exception('mode must be r/w')
 
     def exists(self):
         return self.fs.exists(self.path, self.mtime)

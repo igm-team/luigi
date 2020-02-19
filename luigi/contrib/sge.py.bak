@@ -94,6 +94,7 @@ import time
 import sys
 import logging
 import random
+import shutil
 import operator
 try:
     import cPickle as pickle
@@ -106,14 +107,12 @@ from luigi.contrib import sge_runner
 from getpass import getuser
 from flufl.lock import Lock
 from datetime import timedelta
-from math import ceil
 
 logger = logging.getLogger('luigi-interface')
 logger.propagate = 0
 
-#### this is way too flimsy - causes jobs to exit regularly!?!
 POLL_TIME = 30  # decided to hard-code rather than configure here
-QSTAT_LOCK_FILE = "/nfs/seqscratch_ssd/luigi/{}_sge.lock".format(getuser())
+QSTAT_LOCK_FILE = "/nfs/seqscratch_ssd/luigi/sge.lock"
 
 def _parse_qstat_state(qstat_out, job_id):
     """Parse "state" column from `qstat` output for given job_id
@@ -136,21 +135,14 @@ def _parse_qstat_state(qstat_out, job_id):
     return 'u'
 
 def _qacct_success(job_id):
-    sleep_time = 90
-    # sleep_time = 30
-    # time.sleep(sleep_time)
+    sleep_time = 10
+    time.sleep(sleep_time)
     max_iterations = 10
     count = 0
     while count < max_iterations:
-        ############### this is the biggest piece of shit every!?! so much so that i'm fixing it with an extra toping of turd!?!
-        # junk_check="qacct -j {job_id} | grep -E '^(failed|exit_status)' | awk '{{print $2}}' | uniq".format(job_id=job_id) 
-        junk_check="qacct -j {job_id} | grep -E '^(failed|exit_status)' | tail -n2 | awk '{{print $2}}' | uniq".format(job_id=job_id) 
-        logger.info(junk_check)
-        p = subprocess.Popen(junk_check, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out, err = p.communicate()
-        # logger.info('fer : out={}, err={}, job='.format(out,err,job_id))
-        # err can spam with an "error: job id not found" message if not in qacct yet
-        status = out.strip()
+        status = subprocess.check_output(
+            "qacct -j {job_id} | grep -E '^(failed|exit_status)' | awk '{{print $2}}' | uniq".
+            format(job_id=job_id), shell=True).strip()
         if status:
             return status == "0"
         count += 1
@@ -169,29 +161,17 @@ def _parse_qsub_job_id(qsub_out):
     return int(qsub_out.split()[2])
 
 
-def _build_qsub_command(cmd, job_name, out_dir, pe, n_cpu, mem=None,
-                        javajob=False, sge_priority=None):
+def _build_qsub_command(cmd, job_name, outfile, errfile, pe, n_cpu):
     """Submit shell command to SGE queue via `qsub`"""
-    if not mem:
-        mem = 4
-    if javajob:
-        mem += int(ceil(8.0 / n_cpu))
-    qsub_template = ('echo {cmd} | qsub -cwd -o ":{out_dir}" -e ":{out_dir}" -V '
-                     # dead-lock risk wrt., wrapper
+    qsub_template = ('echo {cmd} | qsub -cwd -o ":{outfile}" -e ":{errfile}" -V '
                      '-pe {pe} {n_cpu} -N {job_name}')
-                     # '-pe {pe} {n_cpu} -p 290 -N {job_name}')
-    ## dsth,oct/31: mem limits are no longer being set by default and we have some jobs exiting 
-    ## due to them so turning this off till we profile mem usage of all stages
-    ## '-pe {pe} {n_cpu} -l h_vmem={mem}g -N {job_name}')
     # retrying could be problematic if in "E" state as it is inferred this job
     # failed
-    #qsub_template = ('echo {cmd} | qsub -cwd -o ":{out_file}" -e ":{err_file}" -V -r y '
+    #qsub_template = ('echo {cmd} | qsub -cwd -o ":{outfile}" -e ":{errfile}" -V -r y '
     #                 '-pe {pe} {n_cpu} -N {job_name}')
-    qsub_command = qsub_template.format(
-        cmd=cmd, job_name=job_name, out_dir=out_dir, pe=pe, n_cpu=n_cpu, mem=mem)
-    if sge_priority:
-        qsub_command += " -p {sge_priority}".format(sge_priority=sge_priority)
-    return qsub_command
+    return qsub_template.format(
+        cmd=cmd, job_name=job_name, outfile=outfile, errfile=errfile,
+        pe=pe, n_cpu=n_cpu)
 
 def job_log(jid,jn,cmd,logger):
     outs = '%08.2d' % (jid)
@@ -203,11 +183,7 @@ def job_log(jid,jn,cmd,logger):
             x=x+outs[i]+'/'
     if not os.path.exists(x):
         current_umask = os.umask(0000)
-        try:
-            os.makedirs(x, mode=0777)
-        except OSError:
-            if not os.path.exists(x):
-                os.makedirs(x, mode=0777)
+        os.makedirs(x, mode=0777)
         os.umask(current_umask)
     x=x+'sbm.txt'
     with open(x,'w') as fh:
@@ -240,9 +216,7 @@ class SGEJobTask(luigi.Task):
 
     n_cpu = luigi.IntParameter(default=1, significant=False)
     shared_tmp_dir = luigi.OutputDirectoryParameter(
- 	### i don't have time to care about this - sorry.
-        default='/nfs/seqscratch09/informatics/luigi/{user}'.format(user=getuser()),
-        # default='/nfs/seqscratch11/{user}/luigi'.format(user=getuser()),
+        default='/nfs/seqscratch11/{user}/luigi'.format(user=getuser()),
         significant=False)
     parallel_env = luigi.Parameter(default='threaded', significant=False)
     task_name_format = luigi.Parameter(
@@ -272,18 +246,7 @@ class SGEJobTask(luigi.Task):
         significant=False,
         description="tarball (and extract) the luigi files")
     debug = luigi.BoolParameter(
-        significant=False, description="print timing to error file")
-    subdirectory = luigi.Parameter(
-        significant=False, default=None, description="output to this (relative) "
-        "path instead of a randomly generated directory name")
-    mem = luigi.IntParameter(
-        default=-1, significant=False,
-        description="specify the number of GB of memory to request")
-    javajob = luigi.BoolParameter(
-        significant=False, default=False,
-        description="this is a java task...so we need more memory for reasons")
-    sge_priority = luigi.IntParameter(
-        significant=False, default=0, description="SGE priority")
+        significant=False, description="print timing to job.err")
 
     def __init__(self, *args, **kwargs):
         super(SGEJobTask, self).__init__(*args, **kwargs)
@@ -301,14 +264,12 @@ class SGEJobTask(luigi.Task):
             self.job_name = self.task_family
         if not self.wobble:
             self.wobble = float(self.poll_time * 0.05)
-        if self.mem == -1:
-            self.mem = self.n_cpu * 4
 
     def _fetch_task_failures(self):
-        if not os.path.exists(self.err_file):
+        if not os.path.exists(self.errfile):
             logger.info('No error file')
             return []
-        with open(self.err_file, "r") as f:
+        with open(self.errfile, "r") as f:
             errors = f.readlines()
         if errors == []:
             return errors
@@ -318,24 +279,19 @@ class SGEJobTask(luigi.Task):
 
     def _init_local(self):
         # Set up temp folder in shared directory (trim to max filename length)
-        self.random_id = '%016x' % random.getrandbits(64)
-        if self.subdirectory:
-            self.tmp_dir = os.path.join(self.shared_tmp_dir, self.subdirectory.format(
-                task_family=self.task_family, **self.__dict__))
-        else:
-            folder_name = self.task_id + '-' + self.random_id
-            self.tmp_dir = os.path.join(self.shared_tmp_dir, folder_name)
-            max_filename_length = os.fstatvfs(0).f_namemax
-            self.tmp_dir = self.tmp_dir[:max_filename_length]
+        base_tmp_dir = self.shared_tmp_dir
+        random_id = '%016x' % random.getrandbits(64)
+        folder_name = self.task_id + '-' + random_id
+        self.tmp_dir = os.path.join(base_tmp_dir, folder_name)
+        max_filename_length = os.fstatvfs(0).f_namemax
+        self.tmp_dir = self.tmp_dir[:max_filename_length]
         #logger.info("Tmp dir: %s", self.tmp_dir)
-        try:
-            os.makedirs(self.tmp_dir)
-        except OSError:
-            # perhaps another worker created this directory
-            pass
+        os.makedirs(self.tmp_dir)
 
         # Dump the code to be run into a pickle file
-        self._dump()
+        self._dump(self.tmp_dir)
+        cfg = os.path.join(
+            os.path.dirname(os.path.realpath(__file__)), "luigi.cfg")
 
         if self.tarball:
             # Make sure that all the class's dependencies are tarred and available
@@ -345,15 +301,6 @@ class SGEJobTask(luigi.Task):
             luigi.hadoop.create_packages_archive(packages, os.path.join(self.tmp_dir, "packages.tar"))
 
     def run(self):
-        # from pprint import pprint as pp
-        # logger.info("HATE LUIGI : %s", pp(self))
-        # logger.info(pp(self))
-        # logger.info(self)
-        # import traceback
-        # for line in traceback.format_stack():
-            # logger.info("\tcunt\t"+line.strip())
-        # logger.info("HATE LUIGI : %s", pp(self))
-        # exit(1)
         if self.run_locally:
             self.work()
         else:
@@ -371,13 +318,9 @@ class SGEJobTask(luigi.Task):
         """Override this method, rather than ``run()``,  for your actual work."""
         pass
 
-    def _dump(self):
+    def _dump(self, out_dir=''):
         """Dump instance to file."""
-        self.prefix = "{task_family}.{random_id}".format(
-            task_family=self.task_family, random_id=self.random_id)
-        self.job_file = os.path.join(
-            self.tmp_dir, "{prefix}.job-instance.pickle".format(
-                prefix=self.prefix))
+        self.job_file = os.path.join(out_dir, 'job-instance.pickle')
         if self.__module__ == '__main__':
             d = pickle.dumps(self)
             module_name = os.path.basename(sys.argv[0]).rsplit('.', 1)[0]
@@ -385,7 +328,12 @@ class SGEJobTask(luigi.Task):
             open(self.job_file, "w").write(d)
 
         else:
-            pickle.dump(self, open(self.job_file, "w"))
+            try:
+                pickle.dump(self, open(self.job_file, "w"))
+            except Exception as e:
+                import ipdb
+                ipdb.set_trace()
+                ipdb.pm()
 
     def _run_job(self):
 
@@ -393,17 +341,19 @@ class SGEJobTask(luigi.Task):
         runner_path = sge_runner.__file__
         if runner_path.endswith("pyc"):
             runner_path = runner_path[:-3] + "py"
-        job_str = '/nfs/goldstein/software/python2.7.7/bin/python {0} "{1}" "{2}" "{3}"'.format(
-            runner_path, self.tmp_dir, os.getcwd(), self.prefix)
+        job_str = '/nfs/goldstein/software/python2.7.7/bin/python {0} "{1}" "{2}"'.format(runner_path, self.tmp_dir,
+                                                  os.getcwd())  # enclose tmp_dir in quotes to protect from special escape chars
         if self.debug:
             job_str += ' "--debug"'
         if self.tarball:
             job_str += ' "--tarball"'
 
         # Build qsub submit command
-        submit_cmd = _build_qsub_command(
-            job_str, self.job_name, self.tmp_dir, self.parallel_env, self.n_cpu,
-            self.mem, self.javajob, self.sge_priority)
+        self.outfile = os.path.join(self.tmp_dir, 'job.out')
+        self.errfile = os.path.join(self.tmp_dir, 'job.err')
+        submit_cmd = _build_qsub_command(job_str, self.job_name, self.outfile,
+                                         self.errfile, self.parallel_env,
+                                         self.n_cpu)
         logger.info('qsub command: \n' + submit_cmd)
 
         # Submit the job and grab job ID
@@ -414,15 +364,8 @@ class SGEJobTask(luigi.Task):
                         job_name=self.job_name, job_id=self.job_id,
                         output=output))
 
-        self.out_file = os.path.join(
-            self.tmp_dir, "{job_name}.o{job_id}".format(
-                job_name=self.job_name, job_id=self.job_id))
-        self.err_file = os.path.join(
-            self.tmp_dir, "{job_name}.e{job_id}".format(
-                job_name=self.job_name, job_id=self.job_id))
-
-        # disabling old job debugging info
-        # job_log(self.job_id,self.job_name,submit_cmd,logger)
+        # def job_log(jid,jn,cmd):
+        job_log(self.job_id,self.job_name,submit_cmd,logger)
 
         failure = self._track_job()
         if failure:
@@ -435,15 +378,13 @@ class SGEJobTask(luigi.Task):
             logger.info('Removing temporary directory %s' % self.tmp_dir)
             subprocess.call(["rm", "-rf", self.tmp_dir])
             # doesn't always work on NFS
+            #shutil.rmtree(self.tmp_dir)
 
         if failure:
             raise Exception('Job has FAILED:\n' + "\n".join(msg))
 
-    ###### this stuff is WAY too flimsy!?!?
     def _track_job(self):
 	failure = False
-        # flufl_logger = logging.getLogger("flufl.lock")
-        # flufl_logger.disabled = True
         while True:
             # Sleep for a little bit
             if self.wobble:
@@ -460,12 +401,10 @@ class SGEJobTask(luigi.Task):
 
             # See what the job's up to
             # ASSUMPTION
-            ##### this needed to be in a try, loop or timeout appropriately but has been causing lots of issues!?!?
-            ##### if we get issues just give it a few chances...
-            qstat_out = subprocess.check_output(['qstat'])
-            # lock = Lock(QSTAT_LOCK_FILE, timedelta(seconds=60))
-            # with lock:
-            #   qstat_out = subprocess.check_output(['qstat'])
+            lock = Lock(QSTAT_LOCK_FILE)
+            lock.lifetime = timedelta(seconds=5)
+            with lock:
+                qstat_out = subprocess.check_output(['qstat'])
             sge_status = _parse_qstat_state(qstat_out, self.job_id)
             if sge_status == 'r':
                 logger.debug('Job {job_name}:{job_id} is running...'.format(
@@ -483,10 +422,14 @@ class SGEJobTask(luigi.Task):
                     # The job can get here if the job is qdel'd also...need a
                     # more thorough test
                     if _qacct_success(self.job_id):
-                        logger.info('Job {job_name}:{job_id} is done'.format( job_name=self.job_name, job_id=self.job_id) )
+                        logger.info('Job {job_name}:{job_id} is done'.format(
+                            job_name=self.job_name, job_id=self.job_id))
                     else:
-                        raise Exception("dsth: THIS IS FLIMSY : NEED TO DISTINGUISH BETWEEN PROBLEM EXIT AND QACCT ISSUE : Job {job_name}:{job_id} has no errors in log file but did not exit cleanly; may have been killed".format(
-                          job_name=self.job_name, job_id=self.job_id))
+                        raise Exception("Job {job_name}:{job_id} has no errors "
+                                        "in log file but did not exit cleanly; "
+                                        "may have been killed".format(
+                                            job_name=self.job_name,
+                                            job_id=self.job_id))
                 else:
                     logger.error('Job {job_name}:{job_id} has FAILED:\n'.format(
                         job_name=self.job_name, job_id=self.job_id) + '\n'.join(errors))
@@ -509,3 +452,20 @@ class LocalSGEJobTask(SGEJobTask):
 
     def run(self):
         self.work()
+
+class SGEOptionalJobTask(SGEJobTask):
+    """A version that paramemterizes running on the cluster.
+
+    --run-locally will be used to run locally, otherwise the Task is submitted
+    to the SGE cluster.
+    """
+    run_locally = luigi.BoolParameter(
+        default=False, significant=False,
+        description="run locally instead of on the cluster")
+
+    def run(self):
+        if self.run_locally:
+            self.work()
+        else:
+            super(SGEOptionalJobTask, self).run()
+

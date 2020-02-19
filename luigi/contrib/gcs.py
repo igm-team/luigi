@@ -465,7 +465,7 @@ class GCSFlagTarget(GCSTarget):
         if path[-1] != "/":
             raise ValueError("GCSFlagTarget requires the path to be to a "
                              "directory.  It must end with a slash ( / ).")
-        super(GCSFlagTarget, self).__init__(path, format=format, client=client)
+        super(GCSFlagTarget, self).__init__(path)
         self.format = format
         self.fs = client or GCSClient()
         self.flag = flag

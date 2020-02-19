@@ -17,7 +17,6 @@
 import time
 import abc
 import logging
-import warnings
 import xml.etree.ElementTree as ET
 from collections import OrderedDict
 import re
@@ -140,13 +139,6 @@ class QuerySalesforce(Task):
         """Override to True if soql property is a file path."""
         return False
 
-    @property
-    def content_type(self):
-        """
-        Override to use a different content type. Salesforce allows XML, CSV, ZIP_CSV, or ZIP_XML. Defaults to CSV.
-        """
-        return "CSV"
-
     def run(self):
         if self.use_sandbox and not self.sandbox_name:
             raise Exception("Parameter sf_sandbox_name must be provided when uploading to a Salesforce Sandbox")
@@ -157,7 +149,7 @@ class QuerySalesforce(Task):
                            salesforce().sb_security_token,
                            self.sandbox_name)
 
-        job_id = sf.create_operation_job('query', self.object_name, content_type=self.content_type)
+        job_id = sf.create_operation_job('query', self.object_name)
         logger.info("Started query job %s in salesforce for object %s" % (job_id, self.object_name))
 
         batch_id = ''
@@ -167,7 +159,7 @@ class QuerySalesforce(Task):
                 with open(self.soql, 'r') as infile:
                     self.soql = infile.read()
 
-            batch_id = sf.create_batch(job_id, self.soql, self.content_type)
+            batch_id = sf.create_batch(job_id, self.soql)
             logger.info("Creating new batch %s to query: %s for job: %s." % (batch_id, self.object_name, job_id))
             status = sf.block_on_batch(job_id, batch_id)
             if status['state'].lower() == 'failed':
@@ -178,23 +170,11 @@ class QuerySalesforce(Task):
                 if 'foreign key relationships not supported' not in status['state_message'].lower():
                     raise Exception(msg)
             else:
-                result_ids = sf.get_batch_result_ids(job_id, batch_id)
+                result_id = sf.get_batch_results(job_id, batch_id)
+                data = sf.get_batch_result(job_id, batch_id, result_id)
 
-                # If there's only one result, just download it, otherwise we need to merge the resulting downloads
-                if len(result_ids) == 1:
-                    data = sf.get_batch_result(job_id, batch_id, result_ids[0])
-                    with open(self.output().path, 'w') as outfile:
-                        outfile.write(data)
-                else:
-                    # Download each file to disk, and then merge into one.
-                    # Preferring to do it this way so as to minimize memory consumption.
-                    for i, result_id in enumerate(result_ids):
-                        logger.info("Downloading batch result %s for batch: %s and job: %s" % (result_id, batch_id, job_id))
-                        with open("%s.%d" % (self.output().path, i), 'w') as outfile:
-                            outfile.write(sf.get_batch_result(job_id, batch_id, result_id))
-
-                    logger.info("Merging results of batch %s" % batch_id)
-                    self.merge_batch_results(result_ids)
+                with open(self.output().fn, 'w') as outfile:
+                    outfile.write(data)
         finally:
             logger.info("Closing job %s" % job_id)
             sf.close_job(job_id)
@@ -204,29 +184,10 @@ class QuerySalesforce(Task):
             data_file = sf.query_all(self.soql)
 
             reader = csv.reader(data_file)
-            with open(self.output().path, 'w') as outfile:
+            with open(self.output().fn, 'w') as outfile:
                 writer = csv.writer(outfile, dialect='excel')
                 for row in reader:
                     writer.writerow(row)
-
-    def merge_batch_results(self, result_ids):
-        """
-        Merges the resulting files of a multi-result batch bulk query.
-        """
-        outfile = open(self.output().path, 'w')
-
-        if self.content_type.lower() == 'csv':
-            for i, result_id in enumerate(result_ids):
-                with open("%s.%d" % (self.output().path, i), 'r') as f:
-                    header = f.readline()
-                    if i == 0:
-                        outfile.write(header)
-                    for line in f:
-                        outfile.write(line)
-        else:
-            raise Exception("Batch result merging not implemented for %s" % self.content_type)
-
-        outfile.close()
 
 
 class SalesforceAPI(object):
@@ -392,13 +353,14 @@ class SalesforceAPI(object):
         else:
             return json_result
 
-    def create_operation_job(self, operation, obj, external_id_field_name=None, content_type=None):
+    def create_operation_job(self, operation, obj, external_id_field_name=None, content_type='CSV'):
         """
         Creates a new SF job that for doing any operation (insert, upsert, update, delete, query)
 
         :param operation: delete, insert, query, upsert, update, hardDelete. Must be lowercase.
         :param obj: Parent SF object
         :param external_id_field_name: Optional.
+        :param content_type: XML, CSV, ZIP_CSV, or ZIP_XML. Defaults to CSV
         """
         if not self.has_active_session():
             self.start_session()
@@ -457,7 +419,7 @@ class SalesforceAPI(object):
 
         return response
 
-    def create_batch(self, job_id, data, file_type):
+    def create_batch(self, job_id, data, file_type='csv'):
         """
         Creates a batch with either a string of data or a file containing data.
 
@@ -467,6 +429,7 @@ class SalesforceAPI(object):
 
         :param job_id: job_id as returned by 'create_operation_job(...)'
         :param data:
+        :param file_type:
 
         :return: Returns batch_id
         """
@@ -510,27 +473,22 @@ class SalesforceAPI(object):
 
     def get_batch_results(self, job_id, batch_id):
         """
-        DEPRECATED: Use `get_batch_result_ids`
-        """
-        warnings.warn("get_batch_results is deprecated and only returns one batch result. Please use get_batch_result_ids")
-        return self.get_batch_result_ids(job_id, batch_id)[0]
-
-    def get_batch_result_ids(self, job_id, batch_id):
-        """
-        Get result IDs of a batch that has completed processing.
+        Get results of a batch that has completed processing.
+        If the batch is a CSV file, the response is in CSV format.
+        If the batch is an XML file, the response is in XML format.
 
         :param job_id: job_id as returned by 'create_operation_job(...)'
         :param batch_id: batch_id as returned by 'create_batch(...)'
-        :return: list of batch result IDs to be used in 'get_batch_result(...)'
+        :return: batch result response as either CSV or XML, dependent on the batch
         """
         response = requests.get(self._get_batch_results_url(job_id, batch_id),
                                 headers=self._get_batch_info_headers())
         response.raise_for_status()
 
         root = ET.fromstring(response.text)
-        result_ids = [r.text for r in root.findall('%sresult' % self.API_NS)]
+        result = root.find('%sresult' % self.API_NS).text
 
-        return result_ids
+        return result
 
     def get_batch_result(self, job_id, batch_id, result_id):
         """

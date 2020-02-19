@@ -49,14 +49,6 @@ class LocalFileSystem(FileSystem):
     Work in progress - add things as needed.
     """
 
-    def copy(self, old_path, new_path, raise_if_exists=False):
-        if raise_if_exists and os.path.exists(new_path):
-            raise RuntimeError('Destination exists: %s' % new_path)
-        d = os.path.dirname(new_path)
-        if d and not os.path.exists(d):
-            self.mkdir(d)
-        shutil.copy(old_path, new_path)
-
     def exists(self, path):
         return os.path.exists(path)
 
@@ -96,7 +88,7 @@ class LocalFileSystem(FileSystem):
             raise RuntimeError('Destination exists: %s' % new_path)
         d = os.path.dirname(new_path)
         if d and not os.path.exists(d):
-            self.mkdir(d)
+            self.fs.mkdir(d)
         os.rename(old_path, new_path)
 
 
@@ -138,7 +130,7 @@ class LocalTarget(FileSystemTarget):
             return self.format.pipe_reader(fileobj)
 
         else:
-            raise Exception("mode must be 'r' or 'w' (got: %s)" % mode)
+            raise Exception('mode must be r/w (got:%s)' % mode)
 
     def move(self, new_path, raise_if_exists=False):
         self.fs.move(self.path, new_path, raise_if_exists=raise_if_exists)
@@ -150,11 +142,15 @@ class LocalTarget(FileSystemTarget):
         self.fs.remove(self.path)
 
     def copy(self, new_path, raise_if_exists=False):
-        self.fs.copy(self.path, new_path, raise_if_exists)
+        if raise_if_exists and os.path.exists(new_path):
+            raise RuntimeError('Destination exists: %s' % new_path)
+        tmp = LocalTarget(new_path + '-luigi-tmp-%09d' % random.randrange(0, 1e10), is_tmp=True)
+        tmp.makedirs()
+        shutil.copy(self.path, tmp.fn)
+        tmp.move(new_path)
 
     @property
     def fn(self):
-        warnings.warn("Use LocalTarget.path to reference filename", DeprecationWarning, stacklevel=2)
         return self.path
 
     def __del__(self):

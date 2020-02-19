@@ -22,8 +22,6 @@ See :doc:`/central_scheduler` for more info.
 """
 
 import collections
-import inspect
-
 try:
     import cPickle as pickle
 except ImportError:
@@ -44,8 +42,18 @@ from luigi import task_history as history
 from luigi.task_status import DISABLED, DONE, FAILED, PENDING, RUNNING, SUSPENDED, UNKNOWN
 from luigi.task import Config
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("luigi.server")
 
+
+class Scheduler(object):
+    """
+    Abstract base class.
+
+    Note that the methods all take string arguments, not Task objects...
+    """""
+    add_task = NotImplemented
+    get_work = NotImplemented
+    ping = NotImplemented
 
 UPSTREAM_RUNNING = 'UPSTREAM_RUNNING'
 UPSTREAM_MISSING_INPUT = 'UPSTREAM_MISSING_INPUT'
@@ -69,36 +77,6 @@ STATUS_TO_UPSTREAM_MAP = {
 
 TASK_FAMILY_RE = re.compile(r'([^(_]+)[(_]')
 
-RPC_METHODS = {}
-
-
-def rpc_method(**request_args):
-    def _rpc_method(fn):
-        # If request args are passed, return this function again for use as
-        # the decorator function with the request args attached.
-        fn_args = inspect.getargspec(fn)
-
-        assert not fn_args.varargs
-        assert fn_args.args[0] == 'self'
-        all_args = fn_args.args[1:]
-        defaults = dict(zip(reversed(all_args), reversed(fn_args.defaults or ())))
-        required_args = frozenset(arg for arg in all_args if arg not in defaults)
-        fn_name = fn.__name__
-
-        @functools.wraps(fn)
-        def rpc_func(self, *args, **kwargs):
-            actual_args = defaults.copy()
-            actual_args.update(dict(zip(all_args, args)))
-            actual_args.update(kwargs)
-            if not all(arg in actual_args for arg in required_args):
-                raise TypeError('{} takes {} arguments ({} given)'.format(
-                    fn_name, len(all_args), len(actual_args)))
-            return self._request('/api/{}'.format(fn_name), actual_args, **request_args)
-
-        RPC_METHODS[fn_name] = rpc_func
-        return fn
-    return _rpc_method
-
 
 class scheduler(Config):
     # TODO(erikbern): the config_path is needed for backwards compatilibity. We
@@ -112,14 +90,15 @@ class scheduler(Config):
     # These disables last for disable_persist seconds.
     disable_window = parameter.IntParameter(default=3600,
                                             config_path=dict(section='scheduler', name='disable-window-seconds'))
-    disable_failures = parameter.IntParameter(default=999999999,
+    disable_failures = parameter.IntParameter(default=None,
                                               config_path=dict(section='scheduler', name='disable-num-failures'))
-    disable_hard_timeout = parameter.IntParameter(default=999999999,
+    disable_hard_timeout = parameter.IntParameter(default=None,
                                                   config_path=dict(section='scheduler', name='disable-hard-timeout'))
     disable_persist = parameter.IntParameter(default=86400,
                                              config_path=dict(section='scheduler', name='disable-persist-seconds'))
     max_shown_tasks = parameter.IntParameter(default=100000)
     max_graph_nodes = parameter.IntParameter(default=100000)
+    prune_done_tasks = parameter.BoolParameter(default=False)
 
     record_task_history = parameter.BoolParameter(default=False)
 
@@ -184,7 +163,7 @@ class Task(object):
 
     def __init__(self, task_id, status, deps, resources=None, priority=0, family='', module=None,
                  params=None, disable_failures=None, disable_window=None, disable_hard_timeout=None,
-                 tracking_url=None, status_message=None):
+                 tracking_url=None):
         self.id = task_id
         self.stakeholders = set()  # workers ids that are somehow related to this task (i.e. don't prune while any of these workers are still active)
         self.workers = set()  # workers ids that can perform task - task is 'BROKEN' if none of these workers are active
@@ -209,7 +188,6 @@ class Task(object):
         self.disable_hard_timeout = disable_hard_timeout
         self.failures = Failures(disable_window)
         self.tracking_url = tracking_url
-        self.status_message = status_message
         self.scheduler_disable_time = None
         self.runnable = False
 
@@ -220,7 +198,8 @@ class Task(object):
         self.failures.add_failure()
 
     def has_excessive_failures(self):
-        if self.failures.first_failure_time is not None:
+        if (self.failures.first_failure_time is not None and
+                self.disable_hard_timeout):
             if (time.time() >= self.failures.first_failure_time +
                     self.disable_hard_timeout):
                 return True
@@ -229,6 +208,10 @@ class Task(object):
             return True
 
         return False
+
+    def can_disable(self):
+        return (self.disable_failures is not None or
+                self.disable_hard_timeout is not None)
 
     @property
     def pretty_id(self):
@@ -399,7 +382,7 @@ class SimpleTaskState(object):
             elif task.scheduler_disable_time is not None and new_status != DISABLED:
                 return
 
-        if new_status == FAILED and task.status != DISABLED:
+        if new_status == FAILED and task.can_disable() and task.status != DISABLED:
             task.add_failure()
             if task.has_excessive_failures():
                 task.scheduler_disable_time = time.time()
@@ -434,12 +417,11 @@ class SimpleTaskState(object):
 
     def update_status(self, task, config):
         # Mark tasks with no remaining active stakeholders for deletion
-        if (not task.stakeholders) and (task.remove is None) and (task.status != RUNNING):
-            # We don't check for the RUNNING case, because that is already handled
-            # by the fail_dead_worker_task function.
-            logger.debug("Task %r has no stakeholders anymore -> might remove "
-                         "task in %s seconds", task.id, config.remove_delay)
-            task.remove = time.time() + config.remove_delay
+        if not task.stakeholders:
+            if task.remove is None:
+                logger.info("Task %r has stakeholders %r but none remain connected -> might remove "
+                            "task in %s seconds", task.id, task.stakeholders, config.remove_delay)
+                task.remove = time.time() + config.remove_delay
 
         # Re-enable task after the disable time expires
         if task.status == DISABLED and task.scheduler_disable_time is not None:
@@ -497,8 +479,17 @@ class SimpleTaskState(object):
         for worker in workers:
             self.get_worker(worker).disabled = True
 
+    def get_necessary_tasks(self):
+        necessary_tasks = set()
+        for task in self.get_active_tasks():
+            if task.status not in (DONE, DISABLED, UNKNOWN) or \
+                    task.scheduler_disable_time is not None:
+                necessary_tasks.update(task.deps)
+                necessary_tasks.add(task.id)
+        return necessary_tasks
 
-class Scheduler(object):
+
+class CentralPlannerScheduler(Scheduler):
     """
     Async scheduler that can handle multiple workers, etc.
 
@@ -510,7 +501,7 @@ class Scheduler(object):
         Keyword Arguments:
         :param config: an object of class "scheduler" or None (in which the global instance will be used)
         :param resources: a dict of str->int constraints
-        :param task_history_impl: ignore config and use this object as the task history
+        :param task_history_override: ignore config and use this object as the task history
         """
         self._config = config or scheduler(**kwargs)
         self._state = SimpleTaskState(self._config.state_path)
@@ -535,7 +526,6 @@ class Scheduler(object):
     def dump(self):
         self._state.dump()
 
-    @rpc_method()
     def prune(self):
         logger.info("Starting pruning of task graph")
         self._prune_workers()
@@ -546,7 +536,7 @@ class Scheduler(object):
         remove_workers = []
         for worker in self._state.get_active_workers():
             if worker.prune(self._config):
-                logger.debug("Worker %s timed out (no contact for >=%ss)", worker, self._config.worker_disconnect_delay)
+                logger.info("Worker %s timed out (no contact for >=%ss)", worker, self._config.worker_disconnect_delay)
                 remove_workers.append(worker.id)
 
         self._state.inactivate_workers(remove_workers)
@@ -555,10 +545,15 @@ class Scheduler(object):
         assistant_ids = set(w.id for w in self._state.get_assistants())
         remove_tasks = []
 
+        if assistant_ids:
+            necessary_tasks = self._state.get_necessary_tasks()
+        else:
+            necessary_tasks = ()
+
         for task in self._state.get_active_tasks():
             self._state.fail_dead_worker_task(task, self._config, assistant_ids)
             self._state.update_status(task, self._config)
-            if self._state.may_prune(task):
+            if self._state.may_prune(task) and task.id not in necessary_tasks:
                 logger.info("Removing task %r", task.id)
                 remove_tasks.append(task.id)
 
@@ -585,11 +580,10 @@ class Scheduler(object):
             if t is not None and prio > t.priority:
                 self._update_priority(t, prio, worker)
 
-    @rpc_method()
     def add_task(self, task_id=None, status=PENDING, runnable=True,
                  deps=None, new_deps=None, expl=None, resources=None,
                  priority=0, family='', module=None, params=None,
-                 assistant=False, tracking_url=None, worker=None, **kwargs):
+                 assistant=False, tracking_url=None, **kwargs):
         """
         * add task identified by task_id if it doesn't exist
         * if deps is not None, update dependency list
@@ -597,8 +591,7 @@ class Scheduler(object):
         * add additional workers/stakeholders
         * update priority when needed
         """
-        assert worker is not None
-        worker_id = worker
+        worker_id = kwargs['worker']
         worker_enabled = self.update(worker_id)
 
         if worker_enabled:
@@ -667,15 +660,13 @@ class Scheduler(object):
             self._state.get_worker(worker_id).tasks.add(task)
             task.runnable = runnable
 
-    @rpc_method()
     def add_worker(self, worker, info, **kwargs):
         self._state.get_worker(worker).add_info(info)
 
-    @rpc_method()
     def disable_worker(self, worker):
-        self._state.disable_workers({worker})
+        #self._state.disable_workers({worker})
+        self._state.disable_workers(set([worker]))
 
-    @rpc_method()
     def update_resources(self, **resources):
         if self._resources is None:
             self._resources = {}
@@ -721,8 +712,7 @@ class Scheduler(object):
     def _retry_time(self, task, config):
         return time.time() + config.retry_delay
 
-    @rpc_method(allow_null=False)
-    def get_work(self, host=None, assistant=False, current_tasks=None, worker=None, **kwargs):
+    def get_work(self, host=None, assistant=False, current_tasks=None, **kwargs):
         # TODO: remove any expired nodes
 
         # Algo: iterate over all nodes, find the highest priority node no dependencies and available
@@ -739,8 +729,7 @@ class Scheduler(object):
         if self._config.prune_on_get_work:
             self.prune()
 
-        assert worker is not None
-        worker_id = worker
+        worker_id = kwargs['worker']
         # Return remaining tasks that have no FAILED descendants
         self.update(worker_id, {'host': host}, get_work=True)
         if assistant:
@@ -835,7 +824,6 @@ class Scheduler(object):
 
         return reply
 
-    @rpc_method(attempts=1)
     def ping(self, **kwargs):
         worker_id = kwargs['worker']
         self.update(worker_id)
@@ -862,8 +850,9 @@ class Scheduler(object):
                     elif upstream_status_table[dep_id] == '' and dep.deps:
                         # This is the postorder update step when we set the
                         # status based on the previously calculated child elements
-                        upstream_severities = list(upstream_status_table.get(a_task_id) for a_task_id in dep.deps if a_task_id in upstream_status_table) or ['']
-                        status = min(upstream_severities, key=UPSTREAM_SEVERITY_KEY)
+                        status = max((upstream_status_table.get(a_task_id, '')
+                                      for a_task_id in dep.deps),
+                                     key=UPSTREAM_SEVERITY_KEY)
                         upstream_status_table[dep_id] = status
             return upstream_status_table[dep_id]
 
@@ -882,7 +871,6 @@ class Scheduler(object):
             'priority': task.priority,
             'resources': task.resources,
             'tracking_url': getattr(task, "tracking_url", None),
-            'status_message': getattr(task, "status_message", None)
         }
         if task.status == DISABLED:
             ret['re_enable_able'] = task.scheduler_disable_time is not None
@@ -890,7 +878,6 @@ class Scheduler(object):
             ret['deps'] = list(task.deps if deps is None else deps)
         return ret
 
-    @rpc_method()
     def graph(self, **kwargs):
         self.prune()
         serialized = {}
@@ -932,7 +919,7 @@ class Scheduler(object):
 
             task = self._state.get_task(task_id)
             if task is None or not task.family:
-                logger.debug('Missing task for id [%s]', task_id)
+                logger.warn('Missing task for id [%s]', task_id)
 
                 # NOTE : If a dependency is missing from self._state there is no way to deduce the
                 #        task family and parameters.
@@ -966,14 +953,12 @@ class Scheduler(object):
 
         return serialized
 
-    @rpc_method()
     def dep_graph(self, task_id, include_done=True, **kwargs):
         self.prune()
         if not self._state.has_task(task_id):
             return {}
         return self._traverse_graph(task_id, include_done=include_done)
 
-    @rpc_method()
     def inverse_dep_graph(self, task_id, include_done=True, **kwargs):
         self.prune()
         if not self._state.has_task(task_id):
@@ -985,8 +970,7 @@ class Scheduler(object):
         return self._traverse_graph(
             task_id, dep_func=lambda t: inverse_graph[t.id], include_done=include_done)
 
-    @rpc_method()
-    def task_list(self, status='', upstream_status='', limit=True, search=None, **kwargs):
+    def task_list(self, status, upstream_status, limit=True, search=None, **kwargs):
         """
         Query for a subset of tasks by status.
         """
@@ -1017,7 +1001,6 @@ class Scheduler(object):
         else:
             return task_id
 
-    @rpc_method()
     def worker_list(self, include_running=True, **kwargs):
         self.prune()
         workers = [
@@ -1049,7 +1032,6 @@ class Scheduler(object):
                 worker['running'] = tasks
         return workers
 
-    @rpc_method()
     def resource_list(self):
         """
         Resources usage info and their consumers (tasks).
@@ -1085,7 +1067,6 @@ class Scheduler(object):
                 ret[resource]['used'] = 0
         return ret
 
-    @rpc_method()
     def task_search(self, task_str, **kwargs):
         """
         Query for a subset of tasks by task_id.
@@ -1101,7 +1082,6 @@ class Scheduler(object):
                 result[task.status][task.id] = serialized
         return result
 
-    @rpc_method()
     def re_enable_task(self, task_id):
         serialized = {}
         task = self._state.get_task(task_id)
@@ -1110,27 +1090,12 @@ class Scheduler(object):
             serialized = self._serialize_task(task_id)
         return serialized
 
-    @rpc_method()
     def fetch_error(self, task_id, **kwargs):
         if self._state.has_task(task_id):
             task = self._state.get_task(task_id)
             return {"taskId": task_id, "error": task.expl, 'displayName': task.pretty_id}
         else:
             return {"taskId": task_id, "error": ""}
-
-    @rpc_method()
-    def set_task_status_message(self, task_id, status_message):
-        if self._state.has_task(task_id):
-            task = self._state.get_task(task_id)
-            task.status_message = status_message
-
-    @rpc_method()
-    def get_task_status_message(self, task_id):
-        if self._state.has_task(task_id):
-            task = self._state.get_task(task_id)
-            return {"taskId": task_id, "statusMessage": task.status_message}
-        else:
-            return {"taskId": task_id, "statusMessage": ""}
 
     def _update_task_history(self, task, status, host=None):
         try:

@@ -45,7 +45,7 @@ from time import time, ctime
 
 
 def _do_work_on_compute_node(
-    work_dir, random_id, tarball=False, start_time=None, debug=False):
+    work_dir, tarball=False, start_time=None, debug=False):
 
     cwd = os.getcwd()
     if tarball:
@@ -57,8 +57,7 @@ def _do_work_on_compute_node(
 
     # Open up the pickle file with the work to be done
     os.chdir(work_dir)
-    with open("{random_id}.job-instance.pickle".format(
-        random_id=random_id), "r") as f:
+    with open("job-instance.pickle", "r") as f:
         job = pickle.load(f)
     if debug:
         sys.stderr.write("loaded pickled data after {} seconds\n".format(
@@ -110,7 +109,7 @@ def main(args=sys.argv):
     """Run the work() method from the class instance in the file "job-instance.pickle".
     """
 
-    # rnr_log(args)
+    rnr_log(args)
 
     try:
         debug = "--debug" in args
@@ -126,8 +125,7 @@ def main(args=sys.argv):
         assert os.path.exists(work_dir), "First argument to sge_runner.py must be a directory that exists"
         project_dir = args[2]
         sys.path.append(project_dir)
-        random_id = args[3]
-        _do_work_on_compute_node(work_dir, random_id, tarball, start_time, debug)
+        _do_work_on_compute_node(work_dir, tarball, start_time, debug)
     except Exception as e:
         # Dump encoded data that we will try to fetch using mechanize
         print(e)

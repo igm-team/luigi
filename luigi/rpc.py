@@ -19,6 +19,7 @@ Implementation of the REST interface between the workers and the server.
 rpc.py implements the client side of it, server.py implements the server side.
 See :doc:`/central_scheduler` for more info.
 """
+
 import json
 import logging
 import socket
@@ -29,7 +30,8 @@ from luigi.six.moves.urllib.request import urlopen
 from luigi.six.moves.urllib.error import URLError
 
 from luigi import configuration
-from luigi.scheduler import RPC_METHODS
+from luigi.scheduler import PENDING, Scheduler
+
 
 HAS_UNIX_SOCKET = True
 HAS_REQUESTS = True
@@ -87,7 +89,7 @@ class RequestsFetcher(object):
         return resp.text
 
 
-class RemoteScheduler(object):
+class RemoteScheduler(Scheduler):
     """
     Scheduler proxy object. Talks to a RemoteSchedulerResponder.
     """
@@ -116,6 +118,7 @@ class RemoteScheduler(object):
         full_url = _urljoin(self._url, url_suffix)
         last_exception = None
         attempt = 0
+        #print(locals())
         while attempt < attempts:
             attempt += 1
             if last_exception:
@@ -147,6 +150,83 @@ class RemoteScheduler(object):
                 return response
         raise RPCError("Received null response from remote scheduler %r" % self._url)
 
+    def ping(self, worker):
+        # just one attempt, keep-alive thread will keep trying anyway
+        self._request('/api/ping', {'worker': worker}, attempts=1)
 
-for method_name, method in RPC_METHODS.items():
-    setattr(RemoteScheduler, method_name, method)
+    def add_task(self, worker, task_id, status=PENDING, runnable=True,
+                 deps=None, new_deps=None, expl=None, resources=None, priority=0,
+                 family='', module=None, params=None, assistant=False,
+                 tracking_url=None):
+        self._request('/api/add_task', {
+            'task_id': task_id,
+            'worker': worker,
+            'status': status,
+            'runnable': runnable,
+            'deps': deps,
+            'new_deps': new_deps,
+            'expl': expl,
+            'resources': resources,
+            'priority': priority,
+            'family': family,
+            'module': module,
+            'params': params,
+            'assistant': assistant,
+            'tracking_url': tracking_url,
+        })
+
+    def get_work(self, worker, host=None, assistant=False, current_tasks=None):
+        return self._request(
+            '/api/get_work',
+            {
+                'worker': worker,
+                'host': host,
+                'assistant': assistant,
+                'current_tasks': current_tasks,
+            },
+            allow_null=False,
+        )
+
+    def graph(self):
+        return self._request('/api/graph', {})
+
+    def dep_graph(self, task_id, include_done=True):
+        return self._request('/api/dep_graph', {'task_id': task_id, 'include_done': include_done})
+
+    def inverse_dep_graph(self, task_id, include_done=True):
+        return self._request('/api/inverse_dep_graph', {
+            'task_id': task_id, 'include_done': include_done})
+
+    def task_list(self, status, upstream_status, search=None):
+        return self._request('/api/task_list', {
+            'search': search,
+            'status': status,
+            'upstream_status': upstream_status,
+        })
+
+    def worker_list(self):
+        return self._request('/api/worker_list', {})
+
+    def resource_list(self):
+        return self._request('/api/resource_list', {})
+
+    def task_search(self, task_str):
+        return self._request('/api/task_search', {'task_str': task_str})
+
+    def fetch_error(self, task_id):
+        return self._request('/api/fetch_error', {'task_id': task_id})
+
+    def add_worker(self, worker, info):
+        return self._request('/api/add_worker', {'worker': worker, 'info': info})
+
+    def disable_worker(self, worker):
+        return self._request('/api/disable_worker', {'worker': worker})
+
+    def update_resources(self, **resources):
+        return self._request('/api/update_resources', resources)
+
+    def prune(self):
+        return self._request('/api/prune', {})
+
+    def re_enable_task(self, task_id):
+        return self._request('/api/re_enable_task', {'task_id': task_id})

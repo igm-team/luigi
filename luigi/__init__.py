@@ -32,10 +32,12 @@ from luigi.rpc import RemoteScheduler, RPCError
 from luigi import parameter
 from luigi.parameter import (
     Parameter,
-    DateParameter, MonthParameter, YearParameter, DateHourParameter, DateMinuteParameter, DateSecondParameter,
+    DateParameter, MonthParameter, YearParameter, DateHourParameter, DateMinuteParameter,
     DateIntervalParameter, TimeDeltaParameter,
     IntParameter, FloatParameter, BooleanParameter, BoolParameter,
-    TaskParameter, EnumParameter, DictParameter, ListParameter, TupleParameter
+    TaskParameter, EnumParameter, DictParameter, ListParameter, TupleParameter,
+    ChoiceParameter, NumericalParameter, InputFileParameter,
+    OutputFileParameter, InputDirectoryParameter, OutputDirectoryParameter
 )
 
 from luigi import configuration
@@ -53,9 +55,11 @@ __all__ = [
     'task', 'Task', 'Config', 'ExternalTask', 'WrapperTask', 'namespace',
     'target', 'Target', 'File', 'LocalTarget', 'rpc', 'RemoteScheduler',
     'RPCError', 'parameter', 'Parameter', 'DateParameter', 'MonthParameter',
-    'YearParameter', 'DateHourParameter', 'DateMinuteParameter', 'DateSecondParameter', 'range',
+    'YearParameter', 'DateHourParameter', 'DateMinuteParameter', 'range',
     'DateIntervalParameter', 'TimeDeltaParameter', 'IntParameter',
     'FloatParameter', 'BooleanParameter', 'BoolParameter', 'TaskParameter',
     'ListParameter', 'TupleParameter', 'EnumParameter', 'DictParameter',
-    'configuration', 'interface', 'file', 'run', 'build', 'event', 'Event'
+    'configuration', 'interface', 'file', 'run', 'build', 'event', 'Event',
+    'ChoiceParameter', 'NumericalParameter', 'InputFileParameter',
+    'OutputFileParameter', 'InputDirectoryParameter', 'OutputDirectoryParameter'
 ]

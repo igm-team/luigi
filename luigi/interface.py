@@ -40,12 +40,14 @@ from luigi import execution_summary
 from luigi.cmdline_parser import CmdlineParser
 
 
-def setup_interface_logging(conf_file=''):
+def setup_interface_logging(conf_file=None):
     # use a variable in the function object to determine if it has run before
     if getattr(setup_interface_logging, "has_run", False):
         return
 
-    if conf_file == '':
+    ###### go straight to stdout
+    if True: # conf_file is None:
+    # if conf_file is None:
         logger = logging.getLogger('luigi-interface')
         logger.setLevel(logging.DEBUG)
 
@@ -86,7 +88,7 @@ class core(task.Config):
         description='Port of remote scheduler api process',
         config_path=dict(section='core', name='default-scheduler-port'))
     scheduler_url = parameter.Parameter(
-        default='',
+        default=None,
         description='Full path to remote scheduler',
         config_path=dict(section='core', name='default-scheduler-url'),
     )
@@ -106,10 +108,10 @@ class core(task.Config):
         default=1,
         description='Maximum number of parallel tasks to run')
     logging_conf_file = parameter.Parameter(
-        default='',
+        default=None,
         description='Configuration file for logging')
     module = parameter.Parameter(
-        default='',
+        default=None,
         description='Used for dynamic loading of modules',
         always_in_help=True)
     parallel_scheduling = parameter.BoolParameter(
@@ -131,7 +133,7 @@ class core(task.Config):
 class _WorkerSchedulerFactory(object):
 
     def create_local_scheduler(self):
-        return scheduler.Scheduler(prune_on_get_work=True, record_task_history=False)
+        return scheduler.CentralPlannerScheduler(prune_on_get_work=True, record_task_history=False)
 
     def create_remote_scheduler(self, url):
         return rpc.RemoteScheduler(url)
@@ -158,7 +160,7 @@ def _schedule_and_run(tasks, worker_scheduler_factory=None, override_defaults=No
     # search for logging configuration path first on the command line, then
     # in the application config file
     logging_conf = env_params.logging_conf_file
-    if logging_conf != '' and not os.path.exists(logging_conf):
+    if logging_conf is not None and not os.path.exists(logging_conf):
         raise Exception(
             "Error: Unable to locate specified logging configuration file!"
         )
@@ -175,7 +177,7 @@ def _schedule_and_run(tasks, worker_scheduler_factory=None, override_defaults=No
     if env_params.local_scheduler:
         sch = worker_scheduler_factory.create_local_scheduler()
     else:
-        if env_params.scheduler_url != '':
+        if env_params.scheduler_url is not None:
             url = env_params.scheduler_url
         else:
             url = 'http://{host}:{port:d}/'.format(

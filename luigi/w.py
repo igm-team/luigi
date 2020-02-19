@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+
 #
 # Copyright 2012-2015 Spotify AB
 #
@@ -156,15 +157,6 @@ class TaskProcess(multiprocessing.Process):
                 missing = [dep.task_id for dep in self.task.deps() if not dep.complete()]
                 if missing:
                     deps = 'dependency' if len(missing) == 1 else 'dependencies'
-                    from random import randint
-                    from cPickle import dump
-                    from pprint import pprint as pp
-                    for dep in self.task.deps():
-                        if not dep.complete():
-                            pp(dep)
-                            dump(dep, open(os.path.join(
-                                "/nfs/seqscratch_ssd/bc2675/unfulfilled_dependencies",
-                                "{}.{}.task".format(dep.task_id, randint(0, 99999999999))), "w"))
                     raise RuntimeError('Unfulfilled %s at run time: %s' % (deps, ', '.join(missing)))
             self.task.trigger_event(Event.START, self.task)
             t0 = time.time()

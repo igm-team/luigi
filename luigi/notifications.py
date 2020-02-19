@@ -133,7 +133,6 @@ def send_email_smtp(config, sender, subject, message, recipients, image_png):
     kwargs = dict(host=smtp_host, port=smtp_port, local_hostname=smtp_local_hostname)
     if smtp_timeout:
         kwargs['timeout'] = smtp_timeout
-
     smtp_login = config.get('core', 'smtp_login', None)
     smtp_password = config.get('core', 'smtp_password', None)
     smtp = smtplib.SMTP(**kwargs) if not smtp_ssl else smtplib.SMTP_SSL(**kwargs)
@@ -156,7 +155,7 @@ def send_email_ses(config, sender, subject, message, recipients, image_png):
       1/ configuration file
       2/ EC2 instance profile
 
-    See also https://boto3.readthedocs.io/en/latest/guide/configuration.html.
+    See also http://boto3.readthedocs.org/en/latest/guide/configuration.html.
     """
     from boto3 import client as boto3_client
 
@@ -215,7 +214,7 @@ def send_email_sns(config, sender, subject, message, topic_ARN, image_png):
       1/ configuration file
       2/ EC2 instance profile
 
-    See also https://boto3.readthedocs.io/en/latest/guide/configuration.html.
+    See also http://boto3.readthedocs.org/en/latest/guide/configuration.html.
     """
     from boto3 import resource as boto3_resource
 
@@ -298,9 +297,9 @@ def send_error_email(subject, message, additional_recipients=None):
             recipients=recipients
         )
     else:
-        logger.info("Skipping error email. Set `error-email` in the `core`"
-                    " section of the Luigi config file or override `owner_email`"
-                    " in the task to receive error emails.")
+        logger.info("Skipping error email. Set `error-email` in the `core` "
+                    "section of the luigi config file or override `owner_email`"
+                    "in the task to receive error emails.")
 
 
 def _prefix(subject):
@@ -315,7 +314,7 @@ def _prefix(subject):
     return subject
 
 
-def format_task_error(headline, task, command, formatted_exception=None):
+def format_task_error(headline, task, formatted_exception=None):
     """
     Format a message body for an error email related to a luigi.task.Task
 
@@ -348,11 +347,6 @@ def format_task_error(headline, task, command, formatted_exception=None):
         </table>
         </pre>
 
-        <h2>Command line</h2>
-        <pre>
-        {command}
-        </pre>
-
         <h2>Traceback</h2>
         {traceback}
         </body>
@@ -362,7 +356,7 @@ def format_task_error(headline, task, command, formatted_exception=None):
         str_params = task.to_str_params()
         params = '\n'.join('<tr><th>{}</th><td>{}</td></tr>'.format(*items) for items in str_params.items())
         body = msg_template.format(headline=headline, name=task.task_family, param_rows=params,
-                                   command=command, traceback=formatted_exception)
+                                   traceback=formatted_exception)
     else:
         msg_template = textwrap.dedent('''\
         {headline}
@@ -372,9 +366,6 @@ def format_task_error(headline, task, command, formatted_exception=None):
         Parameters:
         {params}
 
-        Command line:
-          {command}
-
         {traceback}
         ''')
 
@@ -382,6 +373,6 @@ def format_task_error(headline, task, command, formatted_exception=None):
         max_width = max([0] + [len(x) for x in str_params.keys()])
         params = '\n'.join('  {:{width}}: {}'.format(*items, width=max_width) for items in str_params.items())
         body = msg_template.format(headline=headline, name=task.task_family, params=params,
-                                   command=command, traceback=formatted_exception)
+                                   traceback=formatted_exception)
 
     return body

@@ -29,6 +29,8 @@ from collections import OrderedDict, Mapping
 import operator
 import functools
 from ast import literal_eval
+import os
+from sys import maxsize
 
 try:
     from ConfigParser import NoOptionError, NoSectionError
@@ -154,7 +156,7 @@ class Parameter(object):
 
         if config_path is not None and ('section' not in config_path or 'name' not in config_path):
             raise ParameterException('config_path must be a hash containing entries for section and name')
-        self._config_path = config_path
+        self.__config = config_path
 
         self._counter = Parameter._counter  # We need to keep track of this to get the order right (see Task class)
         Parameter._counter += 1
@@ -194,10 +196,10 @@ class Parameter(object):
         yield (self._get_value_from_config(task_name, param_name.replace('_', '-')),
                'Configuration [{}] {} (with dashes) should be avoided. Please use underscores.'.format(
                task_name, param_name))
-        if self._config_path:
-            yield (self._get_value_from_config(self._config_path['section'], self._config_path['name']),
+        if self.__config:
+            yield (self._get_value_from_config(self.__config['section'], self.__config['name']),
                    'The use of the configuration [{}] {} is deprecated. Please use [{}] {}'.format(
-                   self._config_path['section'], self._config_path['name'], task_name, param_name))
+                   self.__config['section'], self.__config['name'], task_name, param_name))
         yield (self._default, None)
 
     def has_task_value(self, task_name, param_name):
@@ -230,8 +232,6 @@ class Parameter(object):
 
         :param x: the value to serialize.
         """
-        if not isinstance(x, six.string_types) and self.__class__ == Parameter:
-            warnings.warn("Parameter {0} is not of type string.".format(str(x)))
         return str(x)
 
     def normalize(self, x):
@@ -317,20 +317,6 @@ class DateParameter(_DateParameterBase):
 
     A DateParameter is a Date string formatted ``YYYY-MM-DD``. For example, ``2013-07-10`` specifies
     July 10, 2013.
-
-    DateParameters are 90% of the time used to be interpolated into file system paths or the like.
-    Here is a gentle reminder of how to interpolate date parameters into strings:
-
-    .. code:: python
-
-        class MyTask(luigi.Task):
-            date = luigi.DateParameter()
-
-            def run(self):
-                templated_path = "/my/path/to/my/dataset/{date:%Y/%m/%d}/"
-                instantiated_path = templated_path.format(date=self.date)
-                // print(instantiated_path) --> /my/path/to/my/dataset/2016/06/09/
-                // ... use instantiated_path ...
     """
 
     date_format = '%Y-%m-%d'
@@ -500,21 +486,6 @@ class DateMinuteParameter(_DatetimeParameterBase):
             return value
         except ValueError:
             return super(DateMinuteParameter, self).parse(s)
-
-
-class DateSecondParameter(_DatetimeParameterBase):
-    """
-    Parameter whose value is a :py:class:`~datetime.datetime` specified to the second.
-
-    A DateSecondParameter is a `ISO 8601 <http://en.wikipedia.org/wiki/ISO_8601>`_ formatted
-    date and time specified to the second. For example, ``2013-07-10T190738`` specifies July 10, 2013 at
-    19:07:38.
-
-    The interval parameter can be used to clamp this parameter to every N seconds, instead of every second.
-    """
-
-    date_format = '%Y-%m-%dT%H%M%S'
-    _timedelta = datetime.timedelta(seconds=1)
 
 
 class IntParameter(Parameter):
@@ -815,12 +786,6 @@ class DictParameter(Parameter):
                 return obj.get_wrapped()
             return json.JSONEncoder.default(self, obj)
 
-    def normalize(self, value):
-        """
-        Ensure that dictionary parameter is converted to a FrozenOrderedDict so it can be hashed.
-        """
-        return FrozenOrderedDict(value)
-
     def parse(self, s):
         """
         Parses an immutable and ordered ``dict`` from a JSON string using standard JSON library.
@@ -868,15 +833,6 @@ class ListParameter(Parameter):
 
         $ luigi --module my_tasks MyTask --grades '[100,70]'
     """
-    def normalize(self, x):
-        """
-        Ensure that list parameter is converted to a tuple so it can be hashed.
-
-        :param str x: the value to parse.
-        :return: the normalized (hashable/immutable) value.
-        """
-        return tuple(x)
-
     def parse(self, x):
         """
         Parse an individual value from the input.
@@ -959,3 +915,172 @@ class TupleParameter(Parameter):
         :param x: the value to serialize.
         """
         return json.dumps(x)
+
+class ChoiceParameter(Parameter):
+    """Parameter that restricts options to the specified set
+    All choices must be of the same type that so that parse can
+    correctly infer type
+    Variable type is specified with var_type=...
+    """
+    def __init__(self, choices, var_type=str, *args, **kwargs):
+        super(ChoiceParameter, self).__init__(*args, **kwargs)
+        self.choices = set(var_type(choice) for choice in choices)
+        self.var_type = var_type
+        if self.description:
+            self.description += " "
+        else:
+            self.description = ""
+        self.description += (
+            "Choices: {" + ",".join(str(choice) for choice in choices) + "}")
+
+    def parse(self, s):
+        var = self.var_type(s)
+        if var in self.choices:
+            return var
+        else:
+            raise ValueError("{s} is not a valid choice from {choices}".format(
+                s=s, choices=self.choices))
+
+
+class InputFileParameter(Parameter):
+    """
+    Paramater whose value is an existing file.
+    """
+
+    def parse(self, s):
+        """
+        Returns the real path to the file from the string if it exists.
+        """
+        if os.path.isfile(s):
+            return os.path.realpath(s)
+        else:
+            raise OSError("{s} does not exist".format(s=s))
+
+
+class OutputFileParameter(Parameter):
+    """
+    Parameter whose value is an output file to be created.
+    """
+
+    def parse(self, s):
+        """
+        Returns the real path to the file and attempts to create any directories
+        needed.
+        """
+        s = os.path.realpath(s)
+        if not os.path.isdir(os.path.dirname(s)):
+            try:
+                os.makedirs(os.path.dirname(s))
+            except OSError:
+                raise OSError("could not make parent directories for {s}".format(
+                    s=s))
+        return s
+
+
+class InputDirectoryParameter(Parameter):
+    """
+    Parameter whose value is an existing directory."
+    """
+
+    def parse(self, s):
+        """
+        Returns the real path to the directory from the string if it exists.
+        """
+        if os.path.isdir(s):
+            return os.path.realpath(s)
+        else:
+            raise OSError("{s} does not exist".format(s=s))
+
+
+class NumericalParameter(Parameter):
+    """
+    Parameter whose value is a number of the specified type, e.g. ``int`` or
+    ``float`` and in the range specified.
+
+    In the task definition, use
+
+    .. code-block:: python
+
+        class MyTask(luigi.Task):
+            my_param_1 = luigi.NumericalParameter(
+                var_type=int, min_value=-3, max_value=7) # -3 <= my_param_1 < 7
+            my_param_2 = luigi.NumericalParameter(
+                var_type=int, min_value=-3, max_value=7, left_op=operator.lt, right_op=operator.le) # -3 < my_param_2 <= 7
+
+    At the command line, use
+
+    .. code-block:: console
+
+        $ luigi --module my_tasks MyTask --my-param-1 -3 --my-param-2 -2
+    """
+    def __init__(self, left_op=operator.le, right_op=operator.lt, *args, **kwargs):
+        """
+        :param function var_type: The type of the input variable, e.g. int or float.
+        :param min_value: The minimum value permissible in the accepted values
+                          range.  May be inclusive or exclusive based on left_op parameter.
+                          This should be the same type as var_type.
+        :param max_value: The maximum value permissible in the accepted values
+                          range.  May be inclusive or exclusive based on right_op parameter.
+                          This should be the same type as var_type.
+        :param function left_op: The comparison operator for the left-most comparison in
+                                 the expression ``min_value left_op value right_op value``.
+                                 This operator should generally be either
+                                 ``operator.lt`` or ``operator.le``.
+                                 Default: ``operator.le``.
+        :param function right_op: The comparison operator for the right-most comparison in
+                                  the expression ``min_value left_op value right_op value``.
+                                  This operator should generally be either
+                                  ``operator.lt`` or ``operator.le``.
+                                  Default: ``operator.lt``.
+        """
+        if "var_type" not in kwargs:
+            raise ParameterException("var_type must be specified")
+        self._var_type = kwargs.pop("var_type")
+        if "min_value" not in kwargs:
+            raise ParameterException("min_value must be specified")
+        self._min_value = kwargs.pop("min_value")
+        if "max_value" not in kwargs:
+            raise ParameterException("max_value must be specified")
+        self._max_value = kwargs.pop("max_value")
+        self._left_op = left_op
+        self._right_op = right_op
+        self._permitted_range = (
+            "{var_type} in {left_endpoint}{min_value}, {max_value}{right_endpoint}".format(
+                var_type=self._var_type.__name__,
+                min_value=self._min_value, max_value=self._max_value,
+                left_endpoint="[" if left_op == operator.le else "(",
+                right_endpoint=")" if right_op == operator.lt else "]"))
+        super(NumericalParameter, self).__init__(*args, **kwargs)
+        if self.description:
+            self.description += " "
+        else:
+            self.description = ""
+        self.description += "permitted values: " + self._permitted_range
+
+    def parse(self, s):
+        try:
+            value = self._var_type(s)
+        except ValueError:
+            import ipdb
+            ipdb.set_trace()
+            raise
+        if (self._left_op(self._min_value, value) and self._right_op(value, self._max_value)):
+            return value
+        else:
+            raise ValueError(
+                "{s} is not in the set of {permitted_range}".format(
+                    s=s, permitted_range=self._permitted_range))
+
+class OutputDirectoryParameter(Parameter):
+    """Parameter for requiring that parameter is a directory and to create it if
+    necessary
+    """
+
+    def parse(self, s):
+        s = os.path.realpath(s)
+        if not os.path.isdir(s):
+            try:
+                os.makedirs(s)
+            except OSError:
+                raise OSError("Could not create directory for {s}".format(s=s))
+        return s

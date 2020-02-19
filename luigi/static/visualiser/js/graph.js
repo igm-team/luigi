@@ -2,7 +2,8 @@ Graph = (function() {
     var statusColors = {
         "FAILED":"#DD0000",
         "RUNNING":"#0044DD",
-        "PENDING":"#EEBB00",
+        // "PENDING":"#EEBB00", -- too difficult to tell the difference with DONE
+	"PENDING":"#EE7600",
         "DONE":"#00DD00",
         "DISABLED":"#808080",
         "UNKNOWN":"#000000",
